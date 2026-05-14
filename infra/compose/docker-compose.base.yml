@@ -1,59 +1,39 @@
-
 networks:
-  app_net:
-    name: otomuhasebe_saas_net
+  traefik_net:
     external: true
+  internal:
+    driver: bridge
+    name: otomuhasebe_internal
 
 volumes:
   redis_data:
+    name: otomuhasebe_redis_data
     driver: local
   caddy_data:
+    name: otomuhasebe_caddy_data
     driver: local
   caddy_config:
+    name: otomuhasebe_caddy_config
     driver: local
 
 services:
-  caddy:
-    image: caddy:2
-    container_name: otomuhasebe_saas_caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    networks:
-      - app_net
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      - ACME_AGREE=true
-    # healthcheck: DISABLED (geçici - staging container'ları başlatmak için)
-    # test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:80"]
-    # interval: 30s
-    # timeout: 10s
-    # retries: 3
-    # start_period: 10s
-
   postgres:
     image: postgres:16-alpine
     container_name: otomuhasebe_saas_postgres
     restart: unless-stopped
-    ports:
-      - "5433:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: IKYYJ1R8fUZ3PItqxf6qel12VNbLYiOe
       POSTGRES_DB: otomuhasebe_saas_db
       TZ: Europe/Istanbul
+    ports:
+      - "5438:5432"
     volumes:
       - ../data/postgres:/var/lib/postgresql/data
     networks:
-      - app_net
+      - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready", "-U", "postgres"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 30s
       timeout: 3s
       retries: 20
@@ -63,12 +43,12 @@ services:
     container_name: otomuhasebe_saas_redis
     restart: unless-stopped
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:6382:6379"
     command: redis-server --appendonly yes --requirepass ""
     volumes:
       - redis_data:/data
     networks:
-      - app_net
+      - internal
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
@@ -83,17 +63,60 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
-      MINIO_BROWSER: "off"  # Disable public console access
+      MINIO_BROWSER: "off"
     volumes:
-      - /tmp/minio-data:/data  # Host bind mount (persists even if container is removed)
+      - /tmp/minio-data:/data
     ports:
-      - "9000:9000"  # API (Docker network + localhost)
-      - "127.0.0.1:9001:9001"  # Console (localhost only, for admin access)
+      - "9220:9000"
+      - "127.0.0.1:9221:9001"
     networks:
-      - app_net
+      - internal
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  api:
+    build:
+      context: ../../api-stage/server
+      dockerfile: Dockerfile.dev
+    container_name: otomuhasebe_api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://postgres:IKYYJ1R8fUZ3PItqxf6qel12VNbLYiOe@postgres:5432/otomuhasebe_saas_db
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.otomuhasebe-api.rule=Host(`otomuhasebe.localhost`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.otomuhasebe-api.entrypoints=web"
+      - "traefik.http.services.otomuhasebe-api.loadbalancer.server.port=3000"
+    networks:
+      - traefik_net
+      - internal
+
+  panel:
+    build:
+      context: ${PWD}/../../panel-stage/client
+      dockerfile: Dockerfile.dev
+    container_name: otomuhasebe_panel
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      NEXT_TELEMETRY_DISABLED: 1
+      API_PROXY_TARGET: http://otomuhasebe_api:3000
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.otomuhasebe.rule=Host(`otomuhasebe.localhost`)"
+      - "traefik.http.routers.otomuhasebe.entrypoints=web"
+      - "traefik.http.services.otomuhasebe.loadbalancer.server.port=3000"
+    networks:
+      - traefik_net
+      - internal

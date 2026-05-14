@@ -1,18 +1,21 @@
 FROM node:20-alpine
 WORKDIR /app/server
 
-# pnpm kur (Eğer pnpm kullanılıyorsa, aksi halde npm kullanılır)
+# pnpm kur
 RUN npm install -g pnpm@10
 
-# Bağımlılıkları kopyala ve kur
+# Package files
 COPY package.json pnpm-lock.yaml* ./
+COPY tsconfig.json tsconfig.build.json nest-cli.json .swcrc* ./
+
+# Install deps
 RUN pnpm install
 
-# Kaynak kodu kopyala (Volume mount edileceği için bu build aşaması için gerekli)
-COPY . .
+# Source code (skip prisma generate for now)
+COPY src ./src
 
-# Prisma generate (DB tipleri için)
-RUN DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy" npx prisma generate
+# Build
+RUN pnpm run build
 
 ENV NODE_ENV=development
 ENV PORT=3000
